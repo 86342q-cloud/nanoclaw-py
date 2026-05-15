@@ -31,6 +31,9 @@ MODE_FILE = DATA_DIR / "mode.json"
 MODE_DEEPSEEK = "deepseek"
 MODE_MINIMAX = "minimax"
 
+# Test proxy — owner impersonates a domain user for testing
+TEST_PROXY_FILE = DATA_DIR / "test_proxy.json"
+
 
 def get_mode() -> str:
     """Get current agent mode. Default: deepseek."""
@@ -46,6 +49,25 @@ def set_mode(mode: str) -> None:
     MODE_FILE.write_text(json.dumps({"mode": mode}))
 
 
+def get_test_proxy() -> dict | None:
+    """Get current test proxy state. Returns None if not in test mode."""
+    if TEST_PROXY_FILE.exists():
+        return json.loads(TEST_PROXY_FILE.read_text())
+    return None
+
+
+def set_test_proxy(user_id: int | None, user_name: str = "", domain: str = "") -> None:
+    """Set test proxy. user_id=None to disable."""
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    if user_id is None:
+        TEST_PROXY_FILE.unlink(missing_ok=True)
+    else:
+        TEST_PROXY_FILE.write_text(json.dumps({
+            "user_id": user_id,
+            "user_name": user_name,
+            "domain": domain,
+        }))
+
+
 def get_chat_workspace(chat_id: int) -> Path:
-    """Get workspace directory for a specific chat."""
     return WORKSPACE_DIR

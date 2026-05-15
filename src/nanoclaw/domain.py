@@ -125,7 +125,7 @@ def get_domain_buttons(domain_name: str) -> list[dict[str, Any]]:
 
 
 def add_suggestion(user_name: str, domain: str, message: str) -> int:
-    """Save a suggestion. Returns ID."""
+    """Save a 'передай Антону' suggestion. Returns ID."""
     conn = _get_conn()
     cursor = conn.execute(
         "INSERT INTO suggestions (user_name, domain, message) VALUES (?, ?, ?)",
@@ -160,3 +160,41 @@ def domain_has_capability(domain_name: str, capability: str) -> bool:
         return False
     caps = config.get("capabilities", {})
     return caps.get(capability, False)
+
+
+def build_system_prompt(domain_name: str, user_name: str) -> str:
+    """Build domain-specific system prompt for the agent."""
+    config = load_domain_config(domain_name)
+    agents_md = load_domain_agents_md(domain_name)
+
+    assistant = config.get("assistant", {}) if config else {}
+    tone = assistant.get("tone", "friendly_professional")
+    assistant_name = assistant.get("name", "Ассист")
+
+    tone_map = {
+        "confident_casual": "уверенный, деловой когда нужно, с лёгким юмором. На «ты». Коротко, без воды.",
+        "friendly_professional": "дружелюбный и профессиональный. На «ты». Понятно и по делу.",
+        "formal": "формальный, деловой, на «вы».",
+        "strict": "строгий, только по делу, без болтовни.",
+    }
+    tone_desc = tone_map.get(tone, tone_map["friendly_professional"])
+
+    prompt = f"""Ты — {assistant_name}, персональный AI-ассистент. Твой пользователь: {user_name}. Домен: {domain_name}.
+
+Твой тон: {tone_desc}
+
+ПРАВИЛА ОБЩЕНИЯ:
+1. Если пользователь уходит не в тему — после 2-3 сообщений мягко верни в рабочий контекст: «Давай вернёмся к делу — у нас много планов!»
+2. Если не уверен что правильно понял — УТОЧНИ СМЫСЛ: «Правильно ли я понимаю, что речь о НОВОЙ логике расчёта или обновлении старой?» Задавай ОТКРЫТЫЕ уточняющие вопросы — не бинарные «да/нет», а смысловые: «О каком именно периоде речь — май целиком или последняя неделя?», «Ты про все авто или только новые?»
+3. Если это просьба/задача — зафиксируй: «Понял: нужно X. Зафиксировал.»
+4. Если это просто болтовня — отвечай легко, но не затягивай.
+5. Если запрос требует данных (трафик, продажи, отчёты) — предложи нажать кнопку или скажи что данные уточняются.
+6. В конце длинного обсуждения предложи подвести итог: «Давай зафиксирую что решили?»
+
+Ты НЕ говоришь «я всё умею». Ты НЕ врёшь про возможности. Ты — экспериментальный ассистент, который учится каждый день."""
+
+    if agents_md:
+        context_excerpt = agents_md[:2000]
+        prompt += f"\n\nКонтекст домена:\n{context_excerpt}"
+
+    return prompt
