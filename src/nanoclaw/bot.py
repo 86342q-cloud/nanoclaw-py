@@ -8,7 +8,7 @@ from telegram.constants import ChatAction
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters
 
 from nanoclaw.agent import run_agent
-from nanoclaw.memory import clear_history, get_chat_stats
+from nanoclaw.memory import clear_history, get_chat_stats, end_session, get_last_session
 from nanoclaw.domain import (
     get_user_profile,
     get_greeting,
@@ -109,6 +109,13 @@ async def _start(update: Update, context) -> None:
         greeting = _test_prefix() + get_greeting(profile["domain"], profile["name"])
         buttons = get_domain_buttons(profile["domain"])
         keyboard = _build_domain_keyboard(buttons)
+
+        # Show previous session if exists
+        last = get_last_session(chat_id=update.effective_chat.id)
+        if last:
+            topics = last.get("topics", "")
+            greeting += f"\n\n📋 *Прошлый раз:* {topics}"
+
         await update.message.reply_text(
             greeting,
             reply_markup=keyboard,
@@ -611,6 +618,10 @@ async def _handle_domain_callback(update: Update, context) -> None:
         )
         return
 
+    if button_config.get("action") == "end_session":
+        await _end_session_handler(update, context, profile)
+        return
+
     script_path = button_config.get("script")
     if script_path:
         await query.answer(f"Запускаю {button_config['label']}...")
@@ -695,6 +706,39 @@ async def _run_domain_script(update, context, script_path: str, button_config: d
             chat_id=chat_id,
             text=f"❌ Ошибка при выполнении: {e}"
         )
+
+
+async def _end_session_handler(update: Update, context, profile: dict) -> None:
+    """End current session: summarize, store, show result."""
+    query = update.callback_query
+    user_id = _effective_user_id(update)
+    chat_id = update.effective_chat.id
+
+    await query.answer("Подвожу итог...")
+
+    result = end_session(chat_id, user_id)
+    msg_count = result["msg_count"]
+    summary = result["summary"]
+    kept = result.get("kept_messages", 0)
+
+    if msg_count == 0:
+        await query.edit_message_text(
+            "📋 Сессия пустая — нечего подводить!",
+            reply_markup=_build_domain_keyboard(get_domain_buttons(profile["domain"])),
+        )
+        return
+
+    text = f"📋 **Сессия завершена**\n\n"
+    text += f"Сообщений: {msg_count}\n"
+    if kept:
+        text += f"Сохранено: последние {kept}\n"
+    text += f"\n{summary}"
+
+    await query.edit_message_text(
+        text[:4000],
+        reply_markup=_build_domain_keyboard(get_domain_buttons(profile["domain"])),
+        parse_mode="Markdown",
+    )
 
 
 async def _add_user_command(update: Update, context) -> None:

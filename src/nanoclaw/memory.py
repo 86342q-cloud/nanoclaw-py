@@ -57,6 +57,22 @@ def _init_schema(conn: sqlite3.Connection) -> None:
         INSERT OR IGNORE INTO memory_meta (key, value)
         VALUES ('schema_version', ?)
     """, (str(SCHEMA_VERSION),))
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS session_summaries (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            chat_id INTEGER NOT NULL,
+            user_id INTEGER NOT NULL,
+            summary TEXT NOT NULL,
+            topics TEXT NOT NULL DEFAULT '',
+            msg_count INTEGER NOT NULL DEFAULT 0,
+            started_at REAL NOT NULL,
+            ended_at REAL NOT NULL
+        )
+    """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_sessions_chat_time
+        ON session_summaries(chat_id, ended_at DESC)
+    """)
     conn.commit()
 
 
@@ -193,3 +209,128 @@ def format_history_for_minimax(history: list[dict[str, Any]]) -> list[dict[str, 
             "content": msg["content"],
         })
     return result
+
+
+# Session self-resume (summarization)
+
+import os
+import httpx
+import asyncio
+
+async def _summarize_via_deepseek(messages: list[dict[str, Any]]) -> str:
+    """Summarize conversation via DeepSeek API. Returns summary string."""
+    conversation = []
+    for m in messages:
+        role = "Пользователь" if m["role"] == "user" else "Ассистент"
+        conversation.append(f"{role}: {m['content']}")
+
+    prompt = (
+        "Сделай краткую сводку диалога. Выдели:\n"
+        "1. Основные темы (2-3 слова через запятую)\n"
+        "2. Что сделано / решено\n"
+        "3. Что в работе / не закончено\n"
+        "4. Важные факты и договорённости\n\n"
+        "Диалог:\n" + "\n".join(conversation[-60:]) + "\n\n"
+        "Сводка:"
+    )
+
+    try:
+        api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+        async with httpx.AsyncClient(timeout=20) as client:
+            r = await client.post(
+                "https://api.deepseek.com/v1/chat/completions",
+                json={
+                    "model": "deepseek-chat",
+                    "messages": [{"role": "user", "content": prompt}],
+                    "max_tokens": 600,
+                    "temperature": 0.2,
+                },
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                },
+            )
+        if r.status_code == 200:
+            return r.json()["choices"][0]["message"]["content"].strip()
+        return ""
+    except Exception:
+        return ""
+
+
+def end_session(chat_id: int, user_id: int) -> dict[str, Any]:
+    """End current session: summarize, store, clear history."""
+    history = get_history(chat_id, max_messages=200, max_tokens=999999)
+    msg_count = len(history)
+
+    if msg_count == 0:
+        return {"summary": "", "topics": "", "msg_count": 0, "kept_messages": 0}
+
+    first_ts = history[0]["created_at"] if history else time.time()
+    last_ts = history[-1]["created_at"] if history else time.time()
+
+    summary = ""
+    kept_messages = 0
+
+    if msg_count < 20:
+        summary = f"Короткая сессия ({msg_count} сообщ.)"
+    else:
+        summary = asyncio.run(_summarize_via_deepseek(history))
+        if not summary:
+            summary = f"Сессия из {msg_count} сообщений"
+
+        if msg_count > 50:
+            kept_messages = 15
+            conn = _get_conn()
+            cutoff_id = history[-15]["id"]
+            conn.execute(
+                "DELETE FROM messages WHERE chat_id = ? AND id < ?",
+                (chat_id, cutoff_id),
+            )
+            conn.commit()
+            conn.close()
+        else:
+            clear_history(chat_id)
+
+    topics = summary.split("\n")[0] if summary else ""
+    if topics.startswith("1."):
+        topics = topics[2:].strip()
+    if len(topics) > 200:
+        topics = topics[:200]
+
+    conn = _get_conn()
+    conn.execute(
+        "INSERT INTO session_summaries (chat_id, user_id, summary, topics, msg_count, started_at, ended_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (chat_id, user_id, summary, topics, msg_count, first_ts, last_ts),
+    )
+    conn.commit()
+    conn.close()
+
+    return {
+        "summary": summary,
+        "topics": topics,
+        "msg_count": msg_count,
+        "kept_messages": kept_messages,
+    }
+
+
+def get_last_session(chat_id: int) -> dict[str, Any] | None:
+    """Get last session summary for a chat."""
+    conn = _get_conn()
+    row = conn.execute(
+        "SELECT * FROM session_summaries WHERE chat_id = ? ORDER BY ended_at DESC LIMIT 1",
+        (chat_id,),
+    ).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+def get_session_topics(chat_id: int, limit: int = 5) -> list[str]:
+    """Get recent session topics for a chat."""
+    conn = _get_conn()
+    rows = conn.execute(
+        "SELECT DISTINCT topics FROM session_summaries WHERE chat_id = ? AND topics != '' ORDER BY ended_at DESC LIMIT ?",
+        (chat_id, limit),
+    ).fetchall()
+    conn.close()
+    return [r["topics"] for r in rows]
