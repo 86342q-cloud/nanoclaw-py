@@ -2,6 +2,8 @@ import asyncio
 import logging
 import sys
 
+from telegram import Update
+
 from nanoclaw.bot import setup_bot
 from nanoclaw.config import ASSISTANT_NAME, DATA_DIR, DB_PATH, STORE_DIR, WORKSPACE_DIR
 from nanoclaw.db import init_db
