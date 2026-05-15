@@ -15,12 +15,10 @@ from nanoclaw.config import ASSISTANT_NAME, DATA_DIR, WORKSPACE_DIR
 DB_PATH = DATA_DIR / "messages.db"
 SCHEMA_VERSION = 1
 
-# Rough token estimation: ~3 chars per token for mixed RU/EN
 CHARS_PER_TOKEN = 3
 
 
 def _get_conn() -> sqlite3.Connection:
-    """Get SQLite connection (create DB and tables if needed)."""
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(DB_PATH))
     conn.row_factory = sqlite3.Row
@@ -31,7 +29,6 @@ def _get_conn() -> sqlite3.Connection:
 
 
 def _init_schema(conn: sqlite3.Connection) -> None:
-    """Create tables if they don't exist."""
     conn.execute("""
         CREATE TABLE IF NOT EXISTS messages (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -77,12 +74,10 @@ def _init_schema(conn: sqlite3.Connection) -> None:
 
 
 def estimate_tokens(text: str) -> int:
-    """Rough token count. ~3 chars per token for mixed RU/EN text."""
     return max(1, len(text) // CHARS_PER_TOKEN)
 
 
 def save_message(chat_id: int, user_id: int, role: str, content: str) -> int:
-    """Save a message and return its ID."""
     conn = _get_conn()
     tokens = estimate_tokens(content)
     now = time.time()
@@ -101,7 +96,6 @@ def get_history(
     max_messages: int = 30,
     max_tokens: int = 8000,
 ) -> list[dict[str, Any]]:
-    """Get recent messages for a chat, trimming to stay within token budget."""
     conn = _get_conn()
     rows = conn.execute(
         "SELECT id, chat_id, user_id, role, content, tokens, created_at "
@@ -130,7 +124,6 @@ def get_history(
 
 
 def clear_history(chat_id: int) -> int:
-    """Delete all messages for a chat. Returns count of deleted rows."""
     conn = _get_conn()
     cursor = conn.execute("DELETE FROM messages WHERE chat_id = ?", (chat_id,))
     deleted = cursor.rowcount
@@ -140,7 +133,6 @@ def clear_history(chat_id: int) -> int:
 
 
 def get_chat_stats(chat_id: int) -> dict[str, Any]:
-    """Get memory stats for a chat."""
     conn = _get_conn()
     row = conn.execute(
         "SELECT COUNT(*) as total, "
@@ -155,7 +147,6 @@ def get_chat_stats(chat_id: int) -> dict[str, Any]:
 
 
 def format_history(history: list[dict[str, Any]]) -> str:
-    """Format message history for inclusion in a prompt."""
     if not history:
         return ""
 
@@ -201,7 +192,6 @@ def ensure_workspace() -> None:
 
 
 def format_history_for_minimax(history: list[dict[str, Any]]) -> list[dict[str, str]]:
-    """Format history as OpenAI-compatible messages for MiniMax API."""
     result = []
     for msg in history:
         result.append({
@@ -211,14 +201,11 @@ def format_history_for_minimax(history: list[dict[str, Any]]) -> list[dict[str, 
     return result
 
 
-# Session self-resume (summarization)
-
 import os
 import httpx
 import asyncio
 
 async def _summarize_via_deepseek(messages: list[dict[str, Any]]) -> str:
-    """Summarize conversation via DeepSeek API. Returns summary string."""
     conversation = []
     for m in messages:
         role = "Пользователь" if m["role"] == "user" else "Ассистент"
@@ -257,8 +244,7 @@ async def _summarize_via_deepseek(messages: list[dict[str, Any]]) -> str:
         return ""
 
 
-def end_session(chat_id: int, user_id: int) -> dict[str, Any]:
-    """End current session: summarize, store, clear history."""
+def end_session(chat_id: int, user_id: int, summary: str = "") -> dict[str, Any]:
     history = get_history(chat_id, max_messages=200, max_tokens=999999)
     msg_count = len(history)
 
@@ -268,16 +254,17 @@ def end_session(chat_id: int, user_id: int) -> dict[str, Any]:
     first_ts = history[0]["created_at"] if history else time.time()
     last_ts = history[-1]["created_at"] if history else time.time()
 
-    summary = ""
     kept_messages = 0
 
-    if msg_count < 20:
-        summary = f"Короткая сессия ({msg_count} сообщ.)"
-    else:
-        summary = asyncio.run(_summarize_via_deepseek(history))
-        if not summary:
-            summary = f"Сессия из {msg_count} сообщений"
+    if not summary:
+        if msg_count < 20:
+            summary = f"Короткая сессия ({msg_count} сообщ.)"
+        else:
+            summary = asyncio.run(_summarize_via_deepseek(history))
+            if not summary:
+                summary = f"Сессия из {msg_count} сообщений"
 
+    if summary and msg_count >= 20:
         if msg_count > 50:
             kept_messages = 15
             conn = _get_conn()
@@ -315,7 +302,6 @@ def end_session(chat_id: int, user_id: int) -> dict[str, Any]:
 
 
 def get_last_session(chat_id: int) -> dict[str, Any] | None:
-    """Get last session summary for a chat."""
     conn = _get_conn()
     row = conn.execute(
         "SELECT * FROM session_summaries WHERE chat_id = ? ORDER BY ended_at DESC LIMIT 1",
@@ -326,7 +312,6 @@ def get_last_session(chat_id: int) -> dict[str, Any] | None:
 
 
 def get_session_topics(chat_id: int, limit: int = 5) -> list[str]:
-    """Get recent session topics for a chat."""
     conn = _get_conn()
     rows = conn.execute(
         "SELECT DISTINCT topics FROM session_summaries WHERE chat_id = ? AND topics != '' ORDER BY ended_at DESC LIMIT ?",

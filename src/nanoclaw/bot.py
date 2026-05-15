@@ -8,7 +8,7 @@ from telegram.constants import ChatAction
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters
 
 from nanoclaw.agent import run_agent
-from nanoclaw.memory import clear_history, get_chat_stats, end_session, get_last_session
+from nanoclaw.memory import clear_history, get_chat_stats, end_session, get_last_session, _summarize_via_deepseek, get_history
 from nanoclaw.domain import (
     get_user_profile,
     get_greeting,
@@ -58,7 +58,6 @@ MODE_DESCRIPTIONS = {
 
 
 def _effective_user_id(update: Update) -> int:
-    """Return the effective user ID — test proxy if active, else real user."""
     proxy = get_test_proxy()
     if proxy and update.effective_user.id == OWNER_ID:
         return proxy["user_id"]
@@ -66,7 +65,6 @@ def _effective_user_id(update: Update) -> int:
 
 
 def _is_owner(update: Update) -> bool:
-    """Check if user is owner OR registered domain user."""
     if update.effective_user is None:
         return False
     user_id = update.effective_user.id
@@ -110,7 +108,6 @@ async def _start(update: Update, context) -> None:
         buttons = get_domain_buttons(profile["domain"])
         keyboard = _build_domain_keyboard(buttons)
 
-        # Show previous session if exists
         last = get_last_session(chat_id=update.effective_chat.id)
         if last:
             topics = last.get("topics", "")
@@ -151,7 +148,6 @@ async def _mode_command(update: Update, context) -> None:
 
 
 async def _test_command(update: Update, context) -> None:
-    """/test <domain> — owner impersonates domain user for testing."""
     if update.effective_user.id != OWNER_ID:
         return
     args = update.message.text.split()[1:] if update.message.text else []
@@ -191,7 +187,6 @@ async def _test_command(update: Update, context) -> None:
 
 
 async def _testoff_command(update: Update, context) -> None:
-    """/testoff — exit test proxy."""
     if update.effective_user.id != OWNER_ID:
         return
     proxy = get_test_proxy()
@@ -240,7 +235,6 @@ async def _status_command(update: Update, context) -> None:
 
 
 async def _voice_confirm_callback(update: Update, context) -> None:
-    """Handle voice confirmation: ✅ → run agent, ❌ → ask to repeat."""
     query = update.callback_query
     if not _is_owner(update):
         await query.answer("Нет доступа")
@@ -407,7 +401,6 @@ async def _transcribe_voice(file_path: str) -> str:
 
 
 async def _correct_stt(raw_text: str, domain_name: str = "") -> str:
-    """Correct STT transcription errors using DeepSeek API."""
     if not raw_text.strip():
         return raw_text
 
@@ -709,17 +702,14 @@ async def _run_domain_script(update, context, script_path: str, button_config: d
 
 
 async def _end_session_handler(update: Update, context, profile: dict) -> None:
-    """End current session: summarize, store, show result."""
     query = update.callback_query
     user_id = _effective_user_id(update)
     chat_id = update.effective_chat.id
 
     await query.answer("Подвожу итог...")
 
-    result = end_session(chat_id, user_id)
-    msg_count = result["msg_count"]
-    summary = result["summary"]
-    kept = result.get("kept_messages", 0)
+    history = get_history(chat_id, max_messages=200, max_tokens=999999)
+    msg_count = len(history)
 
     if msg_count == 0:
         await query.edit_message_text(
@@ -727,6 +717,17 @@ async def _end_session_handler(update: Update, context, profile: dict) -> None:
             reply_markup=_build_domain_keyboard(get_domain_buttons(profile["domain"])),
         )
         return
+
+    summary = ""
+    if msg_count < 20:
+        summary = f"Короткая сессия ({msg_count} сообщ.)"
+    else:
+        summary = await _summarize_via_deepseek(history)
+        if not summary:
+            summary = f"Сессия из {msg_count} сообщений"
+
+    result = end_session(chat_id, user_id, summary=summary)
+    kept = result.get("kept_messages", 0)
 
     text = f"📋 **Сессия завершена**\n\n"
     text += f"Сообщений: {msg_count}\n"
